@@ -1,0 +1,616 @@
+#!/usr/bin/ksh
+##################################################################################
+#
+# Name      : KornShellComplexFlatFileTransformer.ksh
+# Author    : John Fisher
+# Date      : 11.15.2006
+# Purpose   : In the absence of a Complex Flat File Transform Stage in the current 
+#             version of IBM Ascential (now InfoSphere) DataStage, Convert or 
+#             "Transform" the yearly IBC 1099 complex flat file having 5 different 
+#             record types for detail recs, subtotal recs, total recs and so on
+#             (TRECORD,ARECORD,BRECORD,CRECORD,FRECORD), to the IRS Publication 
+#             1220 "1099-MISC" format.
+#
+# License   : None, totally usable by all freely
+#
+# Usage     : If you find yourself in the unfortunate position of not having or 
+#             being without the benefit of a robust, capable and modern ETL Tool 
+#             such as IBM InfoSphere DataStage or SSIS, feel free to clone this code
+#             and modify as necessary to perform transformation of complex flat files
+#             having one or more types of detail records and/or one or more types of
+#             subtotals records and/or one or more types of totals records.
+#
+##################################################################################
+# Modification History:
+##################################################################################
+# Name:             Date:	Description:     
+##################################################################################
+# John Fisher       11.15.2006	Created. Generate 1099s for providers
+# 			        in network providing at least one service 
+# John Fisher       12.14.2006	Add Output/Working directory as a parameter. 
+#                         	Check cat function return code and Echo return
+#                               code when program fails for whichever reason.
+# John Fisher       01.08.2007	Add conversion logic to handle negative amount
+#                         	values. Actual production file contains these, 
+#                               which was unexpected.
+# John Fisher       01.10.2007	Place hyphen into converted file as left-most
+#                         	character of negative amount value, PAD with
+#                               zeroes after that. Positive numbers will be 
+#                               left-padded with zeroes only. 
+##################################################################################
+# Use set -x to turn debugger on. Uncomment it, that is.
+##################################################################################
+#set -x
+FILENAME=$1;OUTFILE=$2;TAXYEAR=$3
+svr=$4;db=$5;usr=$6;pw=$7
+OUTPUTDIR=$8
+txcc_file=txcc_out_tmp
+THIS_SCRIPT=$(basename $0)
+typeset -Z8 record_count="0"
+typeset -Z8 processed_count="0"
+record_type="";transmitters_tin=""
+TRECORD="";ARECORD="";BRECORD="";CRECORD="";FRECORD=""
+first_char="";CONVERTEDSTRING=""
+tmp_var1="";tmp_var2="";tmp_var3="";tmp_var4="";tmp_var5=""
+line_width="800";headers="0";currentline="1";spaces_removed=""
+ls_TXCC_PYR_TIN="";ls_TXCC_TRNSMTTR_CNTRL_CD=""
+ls_TXCC_TRNSMTTR_TIN=""
+typeset -L40 ls_TXCC_TRNSMTTR_NAME=""
+typeset -L40 ls_TXCC_PYR_NAME_LINE=""
+typeset -L40 ls_TXCC_PYR_NAME_LINE2=""
+typeset -L40 ls_TXCC_CMPNY_MAILING_ADDR=""
+typeset -L40 ls_TXCC_CMPNY_CTY=""
+ls_TXCC_CMPNY_STATE=""
+typeset -L9 ls_TXCC_CMPNY_ZIP_CD=""
+typeset -L40 ls_TXCC_CNTCT_NAME=""
+typeset -L15 ls_TXCC_CNTCT_PHONE_NMBR=""
+typeset -L35 ls_TXCC_CNTCT_EMAIL_ADDR=""
+ls_test_file_ind=" ";ls_prior_year_ind=" ";
+length=0;common_field_len=40;transmttr_name_len=0
+forty_blanks="                                        "
+twenty_five_blanks="                         "
+fifteen_blanks="               "
+typeset -L4 ls_PAYER_NAME_CONTROL=""
+typeset -L14 ls_AMOUNT_CODES="A11"
+ls_ORIG_FILE_IND="1"
+typeset -L40 ls_TXCC_PYR_SHIPPING_ADDR=""
+typeset -L40 ls_TXCC_PYR_CTY=""
+ls_TXCC_PYR_STATE=""
+typeset -L9 ls_TXCC_PYR_ZIP_CD=""
+typeset -L15 ls_TXCC_PYRS_PHONE_NMBR_AND_EXT=""
+seq_no="";ls_NAME_CONTROL="";ls_TIN_TYPE=""
+ls_PAYEE_TIN="";ls_PAYEE_ACCTNUM=""
+#typeset -Z12 amt1="0"
+typeset -Z12 amt2="0"
+typeset -Z12 amt3="0"
+typeset -Z12 amt4="0"
+typeset -Z12 amt5="0"
+typeset -Z12 amt6="0"
+typeset -Z12 amt7="0"
+typeset -Z12 amt8="0"
+typeset -Z12 amt9="0"
+#typeset -Z12 amt_rec="0"
+typeset -L40 ls_FRST_PAYEE_NAME_LINE=""
+typeset -L40 ls_FRST_PAYEE_NAME_LINE2=""
+typeset -L40 ls_PAYEE_MAILING_ADDR=""
+typeset -L40 ls_PAYEE_CITY=""
+ls_PAYEE_STATE=""
+typeset -L9 ls_PAYEE_ZIP_CD=""
+typeset -Z8 b_count="3"
+twelve_zeroes="000000000000"
+typeset -Z18 amount1_sum="0"
+typeset -Z18 amount2_sum="0"
+typeset -Z18 amount3_sum="0"
+typeset -Z18 amount4_sum="0"
+typeset -Z18 amount5_sum="0"
+typeset -Z18 amount6_sum="0"
+typeset -Z18 amount7_sum="0"
+typeset -Z18 amount8_sum="0"
+typeset -Z18 amount9_sum="0"
+eighteen_zeroes="000000000000000000"
+typeset -Z8 num_of_A_recs="1"
+twenty_one_zeroes="000000000000000000000"
+typeset -Z12 zero_amt="0"
+NEGATIVE_FLAG=0
+typeset -Z11 amt1="0"
+typeset -Z11 amt_rec="0"
+ls_SIGN=""
+
+##################################################################################
+function count_records
+{
+# Set the internal field separator to something other than a space.
+IFS=:
+cat $OUTPUTDIR/$FILENAME | while read C_LINE
+do
+   first_char=`echo $C_LINE | cut -c1`
+   if [ "$first_char" = "P" ]
+   then
+      record_count=`expr $record_count + 1`
+   fi
+done
+echo "\nNumber of Payee records to process: $record_count"
+}
+
+##################################################################################
+function while_read_LINE
+{
+build_T_record
+build_A_record
+rm $OUTPUTDIR/$txcc_file
+cat $OUTPUTDIR/$FILENAME | while read IBC_LINE
+do
+   # Evaluate the first character for either a "P" or a "T",
+   # i.e., a payee record or the trailer record.
+   first_char=`echo $IBC_LINE | cut -c1`
+
+   # Only payee records will be converted, the trailer record will be ignored.
+   if [ "$first_char" = "P" ]
+   then
+      build_B_records
+   fi
+done
+
+build_C_record
+build_F_record
+
+# Delete the first three lines of the converted output file.
+sed -e '1d
+2d
+3d' $OUTPUTDIR/$OUTFILE > $OUTPUTDIR/$OUTFILE.tmp
+/usr/bin/mv $OUTPUTDIR/$OUTFILE.tmp $OUTPUTDIR/$OUTFILE
+}
+
+##################################################################################
+function build_T_record
+{
+rec_type="T"
+
+if [ $db != "PRODIRS" ]
+   then
+   ls_test_file_ind="T"
+fi
+
+get_T_and_A_record_data
+
+TRECORD="$rec_type$TAXYEAR$ls_prior_year_ind$ls_TXCC_TRNSMTTR_TIN\
+$ls_TXCC_TRNSMTTR_CNTRL_CD       $ls_test_file_ind $ls_TXCC_TRNSMTTR_NAME\
+$forty_blanks\
+$ls_TXCC_PYR_NAME_LINE$ls_TXCC_PYR_NAME_LINE2$ls_TXCC_CMPNY_MAILING_ADDR\
+$ls_TXCC_CMPNY_CTY$ls_TXCC_CMPNY_STATE$ls_TXCC_CMPNY_ZIP_CD\
+$fifteen_blanks$record_count\
+$ls_TXCC_CNTCT_NAME$ls_TXCC_CNTCT_PHONE_NMBR$ls_TXCC_CNTCT_EMAIL_ADDR\
+$forty_blanks$forty_blanks$twenty_five_blanks 00000001          I\
+$forty_blanks$forty_blanks$forty_blanks           $forty_blanks\
+$twenty_five_blanks$twenty_five_blanks          "
+
+echo "$TRECORD"
+}
+
+##################################################################################
+function get_T_and_A_record_data
+{   
+cmd="SELECT TXCC_PYR_TIN,TXCC_TRNSMTTR_TIN,\
+TXCC_TRNSMTTR_CNTRL_CD,TXCC_TRNSMTTR_NAME,\
+TXCC_PYR_NAME_LINE,TXCC_PYR_NAME_LINE2,\
+TXCC_CMPNY_MAILING_ADDR,TXCC_CMPNY_CTY,\
+TXCC_CMPNY_STATE,TXCC_CMPNY_ZIP_CD,\
+TXCC_CNTCT_NAME,TXCC_CNTCT_PHONE_NMBR,TXCC_CNTCT_EMAIL_ADDR,TXCC_PYR_SHIPPING_ADDR,\
+TXCC_PYR_CTY,TXCC_PYR_STATE,TXCC_PYR_ZIP_CD,TXCC_PYRS_PHONE_NMBR_AND_EXT \
+FROM EXT_TXCC_COMPANY_INFO \
+WHERE RTRIM(TXCC_LOB_CD) = 'PPHP'"
+
+/opt/sybase/bin/isql -S$svr -U$usr -P$pw -h$headers -w$line_width -s, -o$OUTPUTDIR/$txcc_file <<EOF
+use $db
+go
+set nocount on
+go 
+$cmd
+go
+EOF
+
+isqlstatus=$?
+
+   if [ $isqlstatus != 0 ]
+   then
+      echo EXT_TXCC_COMPANY_INFO QUERY: FAILED TO CONNECT TO SYBASE
+      exit 99
+   fi
+
+   cat $OUTPUTDIR/$txcc_file
+   # Check cat command return code
+   if [ $? -ne 0 ]
+      then
+         echo ${THIS_SCRIPT}
+         echo "Cat command failed - $OUTPUTDIR/$txcc_file"
+         echo "Return code 44"
+         exit 44
+   fi
+
+   # Delete the first two lines of the output file. These are useless 
+   # column headings. ISQL has limited output formatting options unfortunately.
+   sed -e '1d
+   2d' $OUTPUTDIR/$txcc_file > $OUTPUTDIR/$txcc_file.tmp
+   /usr/bin/mv $OUTPUTDIR/$txcc_file.tmp $OUTPUTDIR/$txcc_file
+
+   cat $OUTPUTDIR/$txcc_file | while read txcc_LINE
+   do
+      spaces_removed=`echo $txcc_LINE | cut -f1-`
+   done
+
+   echo $spaces_removed | tr -s " " | sed 's/^[ ]//g' > $OUTPUTDIR/$txcc_file
+   echo $spaces_removed | tr -s " " | sed 's/ ,/,/g' > $OUTPUTDIR/$txcc_file
+
+   cat $OUTPUTDIR/$txcc_file | while read txcc_LINE
+   do
+      # Parse the comma delimited TXCC_COMPANY_INFO file $OUTPUTDIR/$txcc_file.
+      # Extract values via cut and populate local script variables.
+      ls_TXCC_PYR_TIN=`echo $txcc_LINE | cut -f2 -d,`
+      ls_TXCC_TRNSMTTR_TIN=`echo $txcc_LINE  | cut -f3 -d,`
+      ls_TXCC_TRNSMTTR_CNTRL_CD=`echo $txcc_LINE | cut -f4 -d,`
+      ls_TXCC_TRNSMTTR_NAME=`echo $txcc_LINE | cut -f5 -d,`
+      ls_TXCC_PYR_NAME_LINE=`echo $txcc_LINE | cut -f6 -d,`
+      ls_TXCC_PYR_NAME_LINE2=`echo $txcc_LINE | cut -f7 -d,`
+      ls_TXCC_CMPNY_MAILING_ADDR=`echo $txcc_LINE | cut -f8 -d,`
+      ls_TXCC_CMPNY_CTY=`echo $txcc_LINE | cut -f9 -d,`
+      ls_TXCC_CMPNY_STATE=`echo $txcc_LINE | cut -f10 -d,`
+      ls_TXCC_CMPNY_ZIP_CD=`echo $txcc_LINE | cut -f11 -d,`
+      ls_TXCC_CNTCT_NAME=`echo $txcc_LINE | cut -f12 -d,`
+      ls_TXCC_CNTCT_PHONE_NMBR=`echo $txcc_LINE | cut -f13 -d,`
+      ls_TXCC_CNTCT_EMAIL_ADDR=`echo $txcc_LINE | cut -f14 -d,`
+      ls_TXCC_PYR_SHIPPING_ADDR=`echo $txcc_LINE | cut -f15 -d,`
+      ls_TXCC_PYR_CTY=`echo $txcc_LINE | cut -f16 -d,`
+      ls_TXCC_PYR_STATE=`echo $txcc_LINE | cut -f17 -d,`
+      ls_TXCC_PYR_ZIP_CD=`echo $txcc_LINE | cut -f18 -d,`
+      ls_TXCC_PYRS_PHONE_NMBR_AND_EXT=`echo $txcc_LINE | cut -f19 -d,`
+
+      ls_PAYER_NAME_CONTROL=$ls_TXCC_PYR_NAME_LINE
+
+      ############################################################################
+      # Leave diagnostics for future troubleshooting of T and A record creation, 
+      # should it become necessary. 
+      ############################################################################
+      #echo "ls_TXCC_PYR_TIN=${ls_TXCC_PYR_TIN}"
+      #echo "ls_TXCC_TRNSMTTR_TIN=${ls_TXCC_TRNSMTTR_TIN}"
+      #echo "ls_TXCC_TRNSMTTR_CNTRL_CD=${ls_TXCC_TRNSMTTR_CNTRL_CD}"
+      #echo "ls_TXCC_TRNSMTTR_NAME=${ls_TXCC_TRNSMTTR_NAME}"
+      #echo "ls_TXCC_PYR_NAME_LINE=${ls_TXCC_PYR_NAME_LINE}"
+      #echo "ls_TXCC_PYR_NAME_LINE2=${ls_TXCC_PYR_NAME_LINE2}"
+      #echo "ls_TXCC_CMPNY_MAILING_ADDR=${ls_TXCC_CMPNY_MAILING_ADDR}"
+      #echo "ls_TXCC_CMPNY_CTY=${ls_TXCC_CMPNY_CTY}"
+      #echo "ls_TXCC_CMPNY_STATE=${ls_TXCC_CMPNY_STATE}"
+      #echo "ls_TXCC_CMPNY_ZIP_CD=${ls_TXCC_CMPNY_ZIP_CD}"
+      #echo "ls_TXCC_CNTCT_NAME=${ls_TXCC_CNTCT_NAME}"
+      #echo "ls_TXCC_CNTCT_PHONE_NMBR=${ls_TXCC_CNTCT_PHONE_NMBR}"
+      #echo "ls_TXCC_CNTCT_EMAIL_ADDR=${ls_TXCC_CNTCT_EMAIL_ADDR}"
+      #echo "ls_TXCC_PYR_SHIPPING_ADDR=${ls_TXCC_PYR_SHIPPING_ADDR}"
+      #echo "ls_TXCC_PYR_CTY=${ls_TXCC_PYR_CTY}"
+      #echo "ls_TXCC_PYR_STATE=${ls_TXCC_PYR_STATE}"
+      #echo "ls_TXCC_PYR_ZIP_CD=${ls_TXCC_PYR_ZIP_CD}"
+      #echo "ls_TXCC_PYRS_PHONE_NMBR_AND_EXT=${ls_TXCC_PYRS_PHONE_NMBR_AND_EXT}"
+      ############################################################################
+   done
+}
+
+##################################################################################
+function build_A_record
+{
+rec_type="A"
+seq_no="00000002"
+ARECORD="$rec_type$TAXYEAR      $ls_TXCC_PYR_TIN\
+$ls_PAYER_NAME_CONTROL   $ls_AMOUNT_CODES      $ls_ORIG_FILE_IND\
+    $ls_TXCC_PYR_NAME_LINE$ls_TXCC_PYR_NAME_LINE2 \
+$ls_TXCC_PYR_SHIPPING_ADDR$ls_TXCC_PYR_CTY$ls_TXCC_PYR_STATE\
+$ls_TXCC_PYR_ZIP_CD$ls_TXCC_PYRS_PHONE_NMBR_AND_EXT\
+$forty_blanks$forty_blanks$forty_blanks$forty_blanks$forty_blanks\
+$fifteen_blanks$fifteen_blanks$fifteen_blanks$fifteen_blanks$seq_no\
+$forty_blanks$forty_blanks$forty_blanks$forty_blanks$forty_blanks$forty_blanks  "
+
+echo "$ARECORD"
+}
+
+##################################################################################
+function build_B_records
+{
+   rec_type="B"
+
+   # Parse the IBC 1099 file lines into variables. 
+   ls_NAME_CONTROL=`echo $IBC_LINE | cut -c428-431`
+   ls_TIN_TYPE=`echo $IBC_LINE | cut -c436`
+   ls_PAYEE_TIN=`echo $IBC_LINE | cut -c437-445`
+   ls_PAYEE_ACCTNUM=`echo $IBC_LINE | cut -c446-465`
+
+   amt1=`echo $IBC_LINE | cut -c481-490`
+   amt_last=`echo $IBC_LINE | cut -c491`
+
+#echo NEGATIVE_FLAG= $NEGATIVE_FLAG
+   perform_amount_conversion
+#echo NEGATIVE_FLAG= $NEGATIVE_FLAG
+
+   amt_rec=$amt1$amt_last
+
+   if [ $NEGATIVE_FLAG = 1 ]
+   then
+      ls_SIGN="-"
+   else
+      ls_SIGN="0"
+   fi
+
+#   amt2=`echo $IBC_LINE | cut -c492-501`
+#   amt_last=`echo $IBC_LINE | cut -c502`
+#   perform_amount_conversion
+#   amt2=$amt2$amt_last
+
+#   amt3=`echo $IBC_LINE | cut -c503-512`
+#   amt_last=`echo $IBC_LINE | cut -c513`
+#   perform_amount_conversion
+#   amt3=$amt3$amt_last
+
+#   amt4=`echo $IBC_LINE | cut -c514-523`
+#   amt_last=`echo $IBC_LINE | cut -c524`
+#   perform_amount_conversion
+#   amt4=$amt4$amt_last
+
+#   amt5=`echo $IBC_LINE | cut -c525-534`
+#   amt_last=`echo $IBC_LINE | cut -c535`
+#   perform_amount_conversion
+#   amt5=$amt5$amt_last
+
+#   amt6=`echo $IBC_LINE | cut -c536-545`
+#   amt_last=`echo $IBC_LINE | cut -c546`
+#   perform_amount_conversion
+#   amt6=$amt6$amt_last
+
+#   amt7=`echo $IBC_LINE | cut -c547-556`
+#   amt_last=`echo $IBC_LINE | cut -c557`
+#   perform_amount_conversion
+#   amt7=$amt7$amt_last
+
+#   amt8=`echo $IBC_LINE | cut -c558-567`
+#   amt_last=`echo $IBC_LINE | cut -c568`
+#   perform_amount_conversion
+#   amt8=$amt8$amt_last
+
+#   amt9=`echo $IBC_LINE | cut -c569-578`
+#   amt_last=`echo $IBC_LINE | cut -c579`
+#   perform_amount_conversion
+#   amt9=$amt9$amt_last
+
+   ls_FRST_PAYEE_NAME_LINE=`echo $IBC_LINE | cut -c593-632`
+   ls_FRST_PAYEE_NAME_LINE2=`echo $IBC_LINE | cut -c633-672`
+   ls_PAYEE_MAILING_ADDR=`echo $IBC_LINE | cut -c673-712`
+   ls_PAYEE_CITY=`echo $IBC_LINE | cut -c713-741`
+   ls_PAYEE_STATE=`echo $IBC_LINE | cut -c742-743`
+   ls_PAYEE_ZIP_CD=`echo $IBC_LINE | cut -c744-752`
+
+   ############################################################################
+   # Leave diagnostics for future troubleshooting of B record creation, should 
+   # it become necessary. 
+   ############################################################################
+   #echo "ls_NAME_CONTROL=${ls_NAME_CONTROL}"
+   #echo "ls_TIN_TYPE=${ls_TIN_TYPE}"
+   #echo "ls_PAYEE_TIN=${ls_PAYEE_TIN}"
+   #echo "ls_PAYEE_ACCTNUM=${ls_PAYEE_ACCTNUM}"
+   #echo "ls_FRST_PAYEE_NAME_LINE=${ls_FRST_PAYEE_NAME_LINE}"
+   #echo "ls_FRST_PAYEE_NAME_LINE2=${ls_FRST_PAYEE_NAME_LINE2}"
+   #echo "ls_PAYEE_MAILING_ADDR=${ls_PAYEE_MAILING_ADDR}"
+   #echo "ls_PAYEE_CITY=${ls_PAYEE_CITY}"
+   #echo "ls_PAYEE_STATE=${ls_PAYEE_STATE}"
+   #echo "ls_PAYEE_ZIP_CD=${ls_PAYEE_ZIP_CD}"
+   #echo "amt1=${amt1}"
+   #echo "amt2=${amt2}"
+   #echo "amt3=${amt3}"
+   #echo "amt4=${amt4}"
+   #echo "amt5=${amt5}"
+   #echo "amt6=${amt6}"
+   #echo "amt7=${amt7}"
+   #echo "amt8=${amt8}"
+   #echo "amt9=${amt9}"
+   ############################################################################
+
+BRECORD="$rec_type$TAXYEAR $ls_NAME_CONTROL$ls_TIN_TYPE$ls_PAYEE_TIN\
+$ls_PAYEE_ACCTNUM              $zero_amt$zero_amt$zero_amt$zero_amt$zero_amt\
+$zero_amt$ls_SIGN$amt_rec$zero_amt$zero_amt\
+$twelve_zeroes$twelve_zeroes$twelve_zeroes$twelve_zeroes$twelve_zeroes\
+$twenty_five_blanks$ls_FRST_PAYEE_NAME_LINE$ls_FRST_PAYEE_NAME_LINE2$forty_blanks\
+$ls_PAYEE_MAILING_ADDR$forty_blanks$ls_PAYEE_CITY$ls_PAYEE_STATE$ls_PAYEE_ZIP_CD \
+$b_count$forty_blanks$forty_blanks$forty_blanks$forty_blanks$forty_blanks\
+$forty_blanks  "
+
+update_cumualtive_totals
+
+echo "$BRECORD"
+
+   processed_count=`expr $processed_count + 1`
+   b_count=`expr $b_count + 1`
+}
+
+##################################################################################
+function build_C_record
+{
+   rec_type="C"
+
+CRECORD="$rec_type$record_count      $amount1_sum$amount2_sum$amount3_sum\
+$amount4_sum$amount5_sum$amount6_sum$amount7_sum$amount8_sum$amount9_sum\
+$eighteen_zeroes$eighteen_zeroes$eighteen_zeroes$eighteen_zeroes$eighteen_zeroes\
+$forty_blanks$forty_blanks$forty_blanks$forty_blanks$forty_blanks\
+$twenty_five_blanks       $b_count$forty_blanks$forty_blanks$forty_blanks\
+$forty_blanks$forty_blanks$forty_blanks  "
+
+b_count=`expr $b_count + 1`
+
+echo "$CRECORD"
+}
+
+##################################################################################
+function build_F_record
+{
+   rec_type="F"
+
+FRECORD="$rec_type$num_of_A_recs$twenty_one_zeroes                   $record_count\
+$forty_blanks$forty_blanks$forty_blanks$forty_blanks$forty_blanks$forty_blanks\
+$forty_blanks$forty_blanks$forty_blanks$forty_blanks$forty_blanks  $b_count\
+$forty_blanks$forty_blanks$forty_blanks$forty_blanks$forty_blanks$forty_blanks  "
+
+echo "$FRECORD"
+}
+
+##################################################################################
+function update_cumualtive_totals
+{
+   #Place amt1 values in Column 7 for medical payments as per Ray Price 12.13.2006
+   #amount1_sum=`expr $amount1_sum + $amt1`
+   #amount2_sum=`expr $amount2_sum + $amt2`
+   #amount3_sum=`expr $amount3_sum + $amt3`
+   #amount4_sum=`expr $amount4_sum + $amt4`
+   #amount5_sum=`expr $amount5_sum + $amt5`
+   #amount6_sum=`expr $amount6_sum + $amt6`
+   #amount7_sum=`expr $amount7_sum + $amt7`
+   #amount8_sum=`expr $amount8_sum + $amt8`
+   #amount9_sum=`expr $amount9_sum + $amt9`
+
+#echo before NEGATIVE_FLAG=  $NEGATIVE_FLAG
+#echo before amt1=  $amt1
+#echo before amount7_sum=  $amount7_sum
+
+   if [ $NEGATIVE_FLAG = 1 ]
+   then
+      amount7_sum=`expr $amount7_sum - $amt_rec`
+   else
+      amount7_sum=`expr $amount7_sum + $amt_rec`
+   fi
+
+#echo after NEGATIVE_FLAG=  $NEGATIVE_FLAG
+#echo after amt1=  $amt1
+#echo after amount7_sum=  $amount7_sum
+
+}
+
+##################################################################################
+function perform_amount_conversion
+{
+   # Convert the last character of each signed decimal amount.
+
+   case $amt_last in
+   "{")  amt_last="0"
+      NEGATIVE_FLAG=0
+      ;;
+   "A")  amt_last="1"
+      NEGATIVE_FLAG=0
+      ;;
+   "B")  amt_last="2"
+      NEGATIVE_FLAG=0
+      ;;
+   "C")  amt_last="3"
+      NEGATIVE_FLAG=0
+      ;;
+   "D")  amt_last="4"
+      NEGATIVE_FLAG=0
+      ;;
+   "E")  amt_last="5"
+      NEGATIVE_FLAG=0
+      ;;
+   "F")  amt_last="6"
+      NEGATIVE_FLAG=0
+      ;;
+   "G")  amt_last="7"
+      NEGATIVE_FLAG=0
+      ;;
+   "H")  amt_last="8"
+      NEGATIVE_FLAG=0
+      ;;
+   "I")  amt_last="9"
+      NEGATIVE_FLAG=0
+      ;;
+   "}")  amt_last="0"
+      NEGATIVE_FLAG=1
+      ;;
+   "J")  amt_last="1"
+      NEGATIVE_FLAG=1
+      ;;
+   "K")  amt_last="2"
+      NEGATIVE_FLAG=1
+      ;;
+   "L")  amt_last="3"
+      NEGATIVE_FLAG=1
+      ;;
+   "M")  amt_last="4"
+      NEGATIVE_FLAG=1
+      ;;
+   "N")  amt_last="5"
+      NEGATIVE_FLAG=1
+      ;;
+   "O")  amt_last="6"
+      NEGATIVE_FLAG=1
+      ;;
+   "P")  amt_last="7"
+      NEGATIVE_FLAG=1
+      ;;
+   "Q")  amt_last="8"
+      NEGATIVE_FLAG=1
+      ;;
+   "R")  amt_last="9"
+      NEGATIVE_FLAG=1
+      ;;
+  esac
+}
+
+##################################################################################
+################################## START OF MAIN #################################
+##################################################################################
+
+# Looking for exactly eight parameters.
+(( $# == 8 )) || usageparm
+
+# Does the file exist as a regular file?
+[[ -f $1 ]] || usagefile
+
+# Check for existence of the specified output directory.
+if [ ! -d ${OUTPUTDIR} ]
+then
+   echo ${THIS_SCRIPT}
+   echo "Output Directory ${OUTPUTDIR} not found"
+   echo "Return code 33"
+   exit 33
+fi
+
+echo "......................................................."
+echo "......................................................."
+echo "\nConverting IBC 1099 File to IRS format ................"
+echo "......................................................."
+echo "\nProcessing time will be displayed when Finished ......."
+echo "......................................................."
+echo "\nConversion may take several minutes ..................."
+echo "......................................................."
+count_records
+echo "......................................................."
+echo "\nProcessing ... Please wait ...   ...   ...   ...   ...."
+echo "......................................................."
+time while_read_LINE > $OUTPUTDIR/$OUTFILE
+echo "\nFinished Converting IBC 1099 File to IRS format........"
+echo "......................................................."
+echo "\nNumber of Payee records successfully converted: $processed_count"
+echo "......................................................."
+echo "......................................................."
+
+##################################################################################
+################################### END OF MAIN ##################################
+##################################################################################
+
+##################################################################################
+function usageparm
+{
+echo ${THIS_SCRIPT}
+echo "\nUSAGE: $THIS_SCRIPT INFILE OUTFILE TAXYEAR(YYYY) svr db usr pw OUTPUTDIR\n"
+echo "Return code 11"
+exit 11
+}
+
+##################################################################################
+function usagefile
+{
+echo ${THIS_SCRIPT}
+echo "\nUSAGE: File_to_process must exist as a regular file. \n       Check the file name perhaps.\n"
+echo "Return code 22"
+exit 22
+}
